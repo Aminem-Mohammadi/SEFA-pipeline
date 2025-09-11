@@ -1,0 +1,134 @@
+function data_out = step2(session_name, task, result_loc, filename)
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% Stage 2 - EEG Cleaning (HAPPE-based)
+%
+% Implements:
+%   - High-pass filter (1 Hz)
+%   - Line noise reduction (CleanLine)
+%   - Bad channel detection (spectrum criteria)
+%   - ICA decomposition
+%   - Automated IC rejection (MARA + ICLabel)
+%   - Segmentation (task/stimulus-based or resting-state)
+%   - Segment-level interpolation (FASTER)
+%   - Bad segment rejection (optional)
+%   - Final interpolation + re-referencing
+%   - Save processed dataset (.set by default)
+%
+% Input:
+%   session_name  - subject/session ID
+%   task          - task ID
+%   result_loc    - path to subject analysis folder
+%   filename      - input EEG file (from Stage 1)
+%
+% Output:
+%   data_out      - cleaned EEG dataset (EEGLAB structure)
+%
+% Reference: HAPPE (Gabard-Durnam et al., 2018)
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+clc; close all;
+
+%% ---------------- USER CONFIG ----------------
+layout_type = 1;          % 1 = BrainProducts 64, 2 = G.Tec 64
+pipeline_visualizations_semiautomated = 0;  % 0 = fully auto, 1 = semi-auto
+task_EEG_processing = 1;  % 1 = task-related, 0 = resting
+task_conditions = {'win','miss','lose'};    % task events
+segment_data = 1;         % segment trials
+segment_length = 2;       % seconds (for resting)
+segment_interpolation = 1;% use FASTER to interpolate bad channels
+segment_rejection = 0;    % reject bad epochs
+average_rereference = 1;  % 1 = average, 0 = ROI channels
+save_as_format = 3;       % 1 = .txt, 2 = .mat, 3 = .set
+
+% 64-channel BrainProducts cap (10-20)
+chan_IDs = transpose({'AF3';'AF4';'AF7';'AF8';'C1';'C2';'C3';'C4';'C5';'C6';...
+    'CP1';'CP2';'CP3';'CP4';'CP5';'CP6';'CPz';'Cz';'F1';'F2';'F3';'F4';'F5';'F6';...
+    'F7';'F8';'FC1';'FC2';'FC3';'FC4';'FC5';'FC6';'FT10';'FT7';'FT8';'FT9';...
+    'Fp1';'Fp2';'Fpz';'Fz';'O1';'O2';'Oz';'P1';'P2';'P3';'P4';'P5';'P6';'P7';...
+    'P8';'PO3';'PO4';'PO7';'PO8';'POz';'Pz';'T7';'T8';'TP10';'TP7';'TP8';'TP9'});
+
+%% ---------------- PREP ----------------
+src_folder_name = result_loc;
+
+% Make subfolders
+folders = {'intermediate1_wavclean','intermediate2_ICAclean','intermediate3_segmented','processed'};
+for f = 1:length(folders)
+    if ~isdir(fullfile(src_folder_name,folders{f}))
+        mkdir(fullfile(src_folder_name,folders{f}));
+    end
+end
+
+%% ---------------- LOAD DATA ----------------
+cd(result_loc);
+EEG = pop_loadset('filename',filename,'filepath',src_folder_name);
+srate = double(EEG.srate);
+events = EEG.event; complete_event_info = EEG.urevent;
+
+%% ---------------- FILTERING ----------------
+if srate < 500
+    EEG = pop_eegfiltnew(EEG, [],1,[],1,[],0);
+else
+    EEG = pop_eegfiltnew(EEG, 1,30,[],0,[],0);
+end
+EEG.setname='rawEEG_f';
+
+%% ---------------- CHANNEL SELECTION ----------------
+EEG = pop_select(EEG,'channel', chan_IDs);
+full_selected_channels = EEG.chanlocs;
+
+%% ---------------- CLEANLINE (Line Noise) ----------------
+EEG = pop_cleanline(EEG, 'bandwidth',2,'chanlist',[1:EEG.nbchan],...
+    'linefreqs',[60 120],'p',0.01,'winsize',4,'winstep',1);
+EEG.setname='rawEEG_f_clean';
+
+%% ---------------- BAD CHANNEL DETECTION ----------------
+EEG = pop_rejchan(EEG,'elec',[1:EEG.nbchan],'threshold',[-3 3],...
+    'norm','on','measure','spec','freqrange',[1 125]);
+EEG.setname='rawEEG_f_clean_badc';
+
+%% ---------------- ICA ----------------
+EEG = pop_runica(EEG, 'extended',0,'interupt','on');
+EEG = pop_saveset(EEG,'filename',[EEG.setname '_ICA.set'],...
+    'filepath',fullfile(src_folder_name,'intermediate2_ICAclean'));
+
+%% ---------------- MARA ----------------
+[~,EEG,~] = processMARA(EEG,EEG,EEG,[0,0,pipeline_visualizations_semiautomated,...
+    pipeline_visualizations_semiautomated,pipeline_visualizations_semiautomated]);
+EEG.reject.gcompreject(EEG.reject.MARAinfo.posterior_artefactprob > 0.3) = 1;
+EEG = pop_subcomp(EEG,find(EEG.reject.gcompreject),0);
+
+%% ---------------- ICLABEL ----------------
+EEG = pop_iclabel(EEG,'default');
+EEG = pop_icflag(EEG,[NaN NaN;0.75 1;0.6 1;0.8 1;0.8 1;0.8 1;0.8 1]);
+EEG = pop_subcomp(EEG,find(EEG.reject.gcompreject),0);
+
+%% ---------------- SEGMENTATION ----------------
+if segment_data
+    if task_EEG_processing
+        EEG = pop_epoch(EEG, task_conditions, [-1 1.5], 'verbose','no','epochinfo','yes');
+    else
+        EEG = eeg_regepochs(EEG,'recurrence',segment_length,'limits',[0 segment_length],'rmbase',[NaN]);
+    end
+end
+
+%% ---------------- INTERPOLATION ----------------
+EEG = pop_interp(EEG, full_selected_channels, 'spherical');
+
+%% ---------------- RE-REFERENCE ----------------
+if average_rereference
+    EEG = pop_reref(EEG, []);
+else
+    EEG = pop_reref(EEG, {'P3','P4'});
+end
+
+%% ---------------- SAVE FINAL ----------------
+EEG.setname = ['EEG_stage2_final_sub' num2str(session_name)];
+EEG = pop_saveset(EEG,'filename',[EEG.setname '_processed.set'],...
+    'filepath',fullfile(src_folder_name,'processed'));
+
+%% ---------------- OUTPUT ----------------
+data_out = EEG;
+
+fprintf('\n[SEFA] Stage 2 (HAPPE) complete for subject %d\n', session_name);
+
+end

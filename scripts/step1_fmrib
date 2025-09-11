@@ -1,0 +1,59 @@
+function data_out = step1_fmrib(session_name, task, data_loc, result_loc, filename)
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% Stage 1 - Gradient & BCG Artifact Removal (FMRIB)
+% Implements:
+%   - Gradient artifact removal (FASTR)
+%   - ECG/QRS detection
+%   - Pulse artifact subtraction (PAS - PCA/mean)
+%   - Filtering (1-70 Hz)
+%
+% Input:  session/task info, file paths
+% Output: cleaned EEG dataset after Stage 1
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+%% Load EEGLAB
+[ALLEEG, EEG, CURRENTSET, ALLCOM] = eeglab;
+
+%% Load dataset
+EEG = pop_loadset('filename', filename, 'filepath', result_loc);
+[ALLEEG, EEG, CURRENTSET] = eeg_store(ALLEEG, EEG, 0);
+EEG = eeg_checkset(EEG);
+
+% Load channel locations
+EEG = pop_chanedit(EEG, 'lookup', fullfile(data_loc, 'channel_BrainProducts_EasyCap_64.mat'));
+[ALLEEG, EEG] = eeg_store(ALLEEG, EEG, CURRENTSET);
+eeglab redraw;
+
+%% Remove Gradient Artifact
+cd(result_loc);
+data_grad_rmv = pop_fmrib_fastr(EEG, 0, 4, 40, 'T  1_on', 0, 1, 0, 0, 0, 0.03, [32], 'auto');
+data_grad_rmv.setname = ['EEG_gradremove_session_' num2str(session_name)];
+pop_saveset(data_grad_rmv, 'filename', data_grad_rmv.setname);
+
+%% Detect ECG/QRS
+data_QRS_DTCTED = pop_fmrib_qrsdetect(data_grad_rmv, 32, 'qrs', 'no');
+data_QRS_DTCTED.setname = ['EEG_gradremove_markedqrs_session' num2str(session_name)];
+data_QRS_DTCTED = eeg_checkset(data_QRS_DTCTED);
+pop_saveset(data_QRS_DTCTED, 'filename', data_QRS_DTCTED.setname);
+
+%% Remove Pulse Artefact (PCA & Mean)
+data_QRS_rmv_pca = pop_fmrib_pas(data_QRS_DTCTED, 'qrs', 'obs', 4);
+data_QRS_rmv_pca.setname = ['EEG_ecgremoved_PCA_session' num2str(session_name)];
+data_QRS_rmv_pca = pop_saveset(data_QRS_rmv_pca, 'filename', data_QRS_rmv_pca.setname);
+
+data_QRS_rmv_mean = pop_fmrib_pas(data_QRS_DTCTED, 'qrs', 'mean', 4);
+data_QRS_rmv_mean.setname = ['EEG_ecgremoved_mean_session' num2str(session_name)];
+data_QRS_rmv_mean = pop_saveset(data_QRS_rmv_mean, 'filename', data_QRS_rmv_mean.setname);
+
+%% Filtering
+data_QRS_rmv_filtered = pop_eegfiltnew(data_QRS_rmv_mean, 'locutoff',1, 'hicutoff',70, 'plotfreqz',1);
+data_QRS_rmv_filtered.setname = 'EEG_mean_filtered';
+data_QRS_rmv_filtered = pop_saveset(data_QRS_rmv_filtered, 'filename', data_QRS_rmv_filtered.setname, 'savemode','onefile');
+
+data_QRS_rmv_pca_filtered = pop_eegfiltnew(data_QRS_rmv_pca, 'locutoff',1, 'hicutoff',40, 'plotfreqz',1);
+data_QRS_rmv_pca_filtered.setname = 'EEG_pca_filtered';
+data_QRS_rmv_pca_filtered = pop_saveset(data_QRS_rmv_pca_filtered, 'filename', data_QRS_rmv_pca_filtered.setname, 'savemode','onefile');
+
+%% Output dataset
+data_out = data_QRS_rmv_filtered; % you can also return PCA version if preferred
+end
